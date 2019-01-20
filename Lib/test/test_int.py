@@ -23,7 +23,11 @@ L = [
         ('', ValueError),
         (' ', ValueError),
         ('  \t\t  ', ValueError),
-        ("\u0200", ValueError)
+        ("\u0200", ValueError),
+        ('--1', 1),
+        ('+-1', -1),
+        ('-+1', -1),
+        ('+++-++--+---314', 314),
 ]
 
 class IntSubclass(int):

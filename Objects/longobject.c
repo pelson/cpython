@@ -2226,12 +2226,11 @@ PyLong_FromString(const char *str, char **pend, int base)
     while (*str != '\0' && Py_ISSPACE(Py_CHARMASK(*str))) {
         str++;
     }
-    if (*str == '+') {
+    while ((*str == '+') || (*str == '-')) {
+        if (*str == '-') {
+            sign = -sign;
+        }
         ++str;
-    }
-    else if (*str == '-') {
-        ++str;
-        sign = -1;
     }
     if (base == 0) {
         if (str[0] != '0') {
