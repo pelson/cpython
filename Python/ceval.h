@@ -568,6 +568,35 @@ do_raise(PyThreadState *tstate, PyObject *exc, PyObject *cause)
     assert(type != NULL);
     assert(value != NULL);
 
+    /* gh-116862: if `value` carries a traceback that was stitched in a
+       call chain unrelated to where `raise` is now happening, drop it so
+       the rendered trace reflects the actual raise site rather than
+       blending two unrelated stacks. A user-defined tb is always
+       preserved (see user_defined_traceback). */
+    {
+        PyBaseExceptionObject *e = (PyBaseExceptionObject *)value;
+        _PyErr_StackItem *exc_info = _PyErr_GetTopmostException(tstate);
+        PyObject *active = exc_info ? exc_info->exc_value : NULL;
+        if (!e->user_defined_traceback && active != value && e->traceback != NULL) {
+            /* The existing tb is "foreign" unless its head frame appears
+               somewhere on the current call chain, in which case the tb
+               and the current frames compose into a coherent stack. */
+            PyTracebackObject *tb_head = (PyTracebackObject *)e->traceback;
+            PyFrameObject *tb_frame = tb_head->tb_frame;
+            int in_chain = 0;
+            for (_PyInterpreterFrame *f = tstate->current_frame;
+                 f != NULL; f = f->previous) {
+                if (f->frame_obj == tb_frame) {
+                    in_chain = 1;
+                    break;
+                }
+            }
+            if (!in_chain) {
+                Py_CLEAR(e->traceback);
+            }
+        }
+    }
+
     if (cause) {
         PyObject *fixed_cause;
         if (PyExceptionClass_Check(cause)) {
