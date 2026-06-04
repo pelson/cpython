@@ -1955,6 +1955,96 @@ class ExceptionTests(unittest.TestCase):
         self.assertIn(b"MemoryError", output)
 
 
+class CapturedExceptionReraiseTests(unittest.TestCase):
+    """Raising a captured exception from a different call chain renders
+    a traceback rooted at the actual raise site, not a blended stack
+    stitched from two unrelated call chains. See gh-116862.
+
+    These tests inspect __traceback__ via a plain try/except because
+    unittest's assertRaises clears it on the captured exception (to
+    break refcount cycles in Lib/unittest/case.py)."""
+
+    @staticmethod
+    def _tb_frame_names(exc):
+        names = []
+        cursor = exc.__traceback__
+        while cursor is not None:
+            names.append(cursor.tb_frame.f_code.co_name)
+            cursor = cursor.tb_next
+        return names
+
+    def test_stored_exception_clears_foreign_traceback(self):
+        def capture():
+            try:
+                raise ValueError('captured')
+            except ValueError as e:
+                return e
+
+        err = capture()
+        try:
+            raise err
+        except ValueError as caught:
+            names = self._tb_frame_names(caught)
+        # capture()'s frame had already returned at the point of the
+        # re-raise, so it must not appear in the rendered chain.
+        self.assertNotIn('capture', names)
+        # The chain reflects the actual raise site only.
+        self.assertEqual(
+            names[-1], 'test_stored_exception_clears_foreign_traceback')
+
+    def test_bare_raise_preserves_user_defined_traceback(self):
+        # Bare `raise` re-raises the active exception unchanged, so a
+        # user-defined __traceback__ attached inside the except block
+        # must survive the re-raise (it forms the tail of the rendered
+        # tb, with the propagating frames prepended on top).
+        def make_custom_tb():
+            try:
+                raise ValueError('orig')
+            except ValueError as e:
+                return e.__traceback__
+
+        custom_tb = make_custom_tb()
+        try:
+            try:
+                raise RuntimeError('initial')
+            except RuntimeError as e:
+                e.__traceback__ = custom_tb
+                raise
+        except RuntimeError as caught:
+            names = self._tb_frame_names(caught)
+        # The custom tb's frame (make_custom_tb) must appear in the trace.
+        self.assertIn('make_custom_tb', names)
+
+    def test_clearing_traceback_disarms_user_defined_marker(self):
+        # Assigning __traceback__ marks the tb as user-defined so a
+        # later raise preserves it. Assigning None must clear that mark
+        # so the foreign-tb heuristic re-engages on the next raise.
+        def capture():
+            try:
+                raise ValueError('orig')
+            except ValueError as e:
+                return e
+
+        err = capture()
+        # Sanity: setting a user-defined tb survives the raise.
+        explicit_tb = err.__traceback__
+        err.__traceback__ = explicit_tb
+        try:
+            raise err
+        except ValueError as caught:
+            names_with_marker = self._tb_frame_names(caught)
+        self.assertIn('capture', names_with_marker)
+
+        # Now disarm: setting to None must drop the explicit marker.
+        err.__traceback__ = None
+        try:
+            raise err
+        except ValueError as caught:
+            names_after_clear = self._tb_frame_names(caught)
+        # Heuristic re-engages: capture()'s foreign frame stays out.
+        self.assertNotIn('capture', names_after_clear)
+
+
 class NameErrorTests(unittest.TestCase):
     def test_name_error_has_name(self):
         try:

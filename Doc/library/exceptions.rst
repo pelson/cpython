@@ -142,7 +142,10 @@ The following exceptions are used mostly as base classes for other exceptions.
 
       A writable field that holds the
       :ref:`traceback object <traceback-objects>` associated with this
-      exception. See also: :ref:`raise`.
+      exception. A traceback assigned through this attribute is treated
+      as user-defined and is preserved across a later ``raise`` of this
+      exception. Assigning ``None`` clears the traceback. See also:
+      :ref:`raise`.
 
    .. method:: add_note(note)
 

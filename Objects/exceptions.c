@@ -110,6 +110,7 @@ BaseException_vectorcall(PyObject *type_obj, PyObject * const*args,
     self->cause = NULL;
     self->context = NULL;
     self->suppress_context = 0;
+    self->user_defined_traceback = 0;
 
     self->args = PyTuple_FromArray(args, PyVectorcall_NARGS(nargsf));
     if (!self->args) {
@@ -380,16 +381,12 @@ BaseException___traceback___get_impl(PyBaseExceptionObject *self)
 }
 
 
-/*[clinic input]
-@critical_section
-@setter
-BaseException.__traceback__
-[clinic start generated code]*/
-
+/* Shared by the Python-level __traceback__ setter and the C API
+   PyException_SetTraceback. Type-checks `value` and assigns it to
+   self->traceback (or clears it on None). Does NOT touch the
+   user_defined_traceback flag; callers do that if they need it. */
 static int
-BaseException___traceback___set_impl(PyBaseExceptionObject *self,
-                                     PyObject *value)
-/*[clinic end generated code: output=a82c86d9f29f48f0 input=12676035676badad]*/
+set_traceback_field(PyBaseExceptionObject *self, PyObject *value)
 {
     if (value == NULL) {
         PyErr_SetString(PyExc_TypeError, "__traceback__ may not be deleted");
@@ -406,6 +403,28 @@ BaseException___traceback___set_impl(PyBaseExceptionObject *self,
                         "__traceback__ must be a traceback or None");
         return -1;
     }
+    return 0;
+}
+
+/*[clinic input]
+@critical_section
+@setter
+BaseException.__traceback__
+[clinic start generated code]*/
+
+static int
+BaseException___traceback___set_impl(PyBaseExceptionObject *self,
+                                     PyObject *value)
+/*[clinic end generated code: output=a82c86d9f29f48f0 input=12676035676badad]*/
+{
+    int res = set_traceback_field(self, value);
+    if (res < 0) {
+        return res;
+    }
+    /* A real tb assigned from Python is user-defined and survives a
+       subsequent raise; assigning None clears the mark so the next raise
+       falls back to the normal heuristic. */
+    self->user_defined_traceback = (value != Py_None);
     return 0;
 }
 
@@ -521,9 +540,12 @@ PyException_GetTraceback(PyObject *self)
 int
 PyException_SetTraceback(PyObject *self, PyObject *tb)
 {
+    /* C-API tb assignment is not user-defined: this is the same path
+       the internal auto-stitcher (PyTraceBack_Here) takes, and stitched
+       frames must not be marked as user-defined. */
     int res;
     Py_BEGIN_CRITICAL_SECTION(self);
-    res = BaseException___traceback___set_impl(PyBaseExceptionObject_CAST(self), tb);
+    res = set_traceback_field(PyBaseExceptionObject_CAST(self), tb);
     Py_END_CRITICAL_SECTION();
     return res;
 }

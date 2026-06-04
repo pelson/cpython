@@ -585,6 +585,17 @@ same exception instance, with its traceback set to its argument), like so::
 
    raise Exception("foo occurred").with_traceback(tracebackobj)
 
+When ``raise`` *expression* receives an exception that already carries a
+traceback, the resulting traceback depends on how that traceback was set.
+A traceback assigned from Python (via
+:meth:`~BaseException.with_traceback` or assignment to
+:attr:`~BaseException.__traceback__`) is always preserved. Otherwise the
+traceback is kept only when its origin frame is on the current call chain,
+so it continues coherently from the new raise site; if not, it is replaced
+by a fresh traceback rooted at the current frame. Assigning ``None`` to
+:attr:`~BaseException.__traceback__` clears both the traceback and its
+user-set status.
+
 .. index:: pair: exception; chaining
            __cause__ (exception attribute)
            __context__ (exception attribute)
