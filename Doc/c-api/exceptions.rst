@@ -854,7 +854,12 @@ Exception Objects
 .. c:function:: int PyException_SetTraceback(PyObject *ex, PyObject *tb)
 
    Set the traceback associated with the exception to *tb*.  Use ``Py_None`` to
-   clear it.
+   clear it. A traceback set through this function is not treated as
+   user-defined: a later ``raise`` of *ex* will discard *tb* unless its
+   origin frame is on the current call chain (see :ref:`raise`). To attach
+   a traceback that always survives a subsequent ``raise``, assign it from
+   Python via :attr:`~BaseException.__traceback__` or
+   :meth:`~BaseException.with_traceback`.
 
 
 .. c:function:: PyObject* PyException_GetContext(PyObject *ex)

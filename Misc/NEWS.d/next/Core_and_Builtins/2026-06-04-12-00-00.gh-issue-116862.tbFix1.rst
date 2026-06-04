@@ -1,0 +1,7 @@
+Re-raising a previously captured exception with ``raise expr`` from a
+different call chain no longer renders a traceback that blends two
+unrelated stacks. ``do_raise`` now drops the stored traceback when the
+exception's head frame is not on the current call chain, so the
+rendered trace reflects the actual raise site. Tracebacks explicitly
+attached via ``__traceback__ = tb`` or :meth:`BaseException.with_traceback`
+are preserved.
