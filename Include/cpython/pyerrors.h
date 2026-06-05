@@ -9,7 +9,8 @@
              PyObject *args; PyObject *notes; PyObject *traceback;\
              PyObject *context; PyObject *cause;\
              char suppress_context;\
-             char user_defined_traceback;
+             char user_defined_traceback;\
+             PyObject *traceback_history;
 
 typedef struct {
     PyException_HEAD

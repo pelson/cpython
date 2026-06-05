@@ -61,6 +61,8 @@ BaseException_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     self->notes = NULL;
     self->traceback = self->cause = self->context = NULL;
     self->suppress_context = 0;
+    self->user_defined_traceback = 0;
+    self->traceback_history = NULL;
 
     if (args) {
         self->args = Py_NewRef(args);
@@ -111,6 +113,7 @@ BaseException_vectorcall(PyObject *type_obj, PyObject * const*args,
     self->context = NULL;
     self->suppress_context = 0;
     self->user_defined_traceback = 0;
+    self->traceback_history = NULL;
 
     self->args = PyTuple_FromArray(args, PyVectorcall_NARGS(nargsf));
     if (!self->args) {
@@ -132,6 +135,7 @@ BaseException_clear(PyObject *op)
     Py_CLEAR(self->traceback);
     Py_CLEAR(self->cause);
     Py_CLEAR(self->context);
+    Py_CLEAR(self->traceback_history);
     return 0;
 }
 
@@ -157,6 +161,7 @@ BaseException_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->traceback);
     Py_VISIT(self->cause);
     Py_VISIT(self->context);
+    Py_VISIT(self->traceback_history);
     return 0;
 }
 
@@ -428,6 +433,30 @@ BaseException___traceback___set_impl(PyBaseExceptionObject *self,
     return 0;
 }
 
+/* Read-only getter for __traceback_history__: a tuple of traceback
+   objects representing prior raise sites of this exception, oldest
+   first. Populated by `do_raise` when a captured exception is re-raised
+   from a foreign call chain (see gh-116862). */
+static PyObject *
+BaseException___traceback_history___get(PyObject *op, void *Py_UNUSED(closure))
+{
+    PyBaseExceptionObject *self = PyBaseExceptionObject_CAST(op);
+    PyObject *result;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (self->traceback_history == NULL) {
+        result = PyTuple_New(0);
+    }
+    else {
+        result = Py_NewRef(self->traceback_history);
+    }
+    Py_END_CRITICAL_SECTION();
+    return result;
+}
+
+PyDoc_STRVAR(BaseException___traceback_history___doc,
+"A read-only tuple of traceback objects representing prior raise sites "
+"of this exception, oldest first.");
+
 /*[clinic input]
 @critical_section
 @getter
@@ -522,6 +551,8 @@ static PyGetSetDef BaseException_getset[] = {
      BASEEXCEPTION___TRACEBACK___GETSETDEF
      BASEEXCEPTION___CONTEXT___GETSETDEF
      BASEEXCEPTION___CAUSE___GETSETDEF
+    {"__traceback_history__", BaseException___traceback_history___get, NULL,
+     BaseException___traceback_history___doc},
     {NULL},
 };
 

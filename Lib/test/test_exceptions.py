@@ -2045,6 +2045,103 @@ class CapturedExceptionReraiseTests(unittest.TestCase):
         self.assertNotIn('capture', names_after_clear)
 
 
+class TracebackHistoryTests(unittest.TestCase):
+    """`__traceback_history__` collects prior raise-site tracebacks when
+    an exception is re-raised from a foreign call chain (gh-116862)."""
+
+    def test_attribute_empty_by_default(self):
+        e = ValueError('x')
+        self.assertEqual(e.__traceback_history__, ())
+
+    def test_foreign_reraise_appends_to_history(self):
+        def capture():
+            try:
+                raise ValueError('original')
+            except ValueError as e:
+                return e
+        err = capture()
+        try:
+            raise err
+        except ValueError as caught:
+            self.assertEqual(len(caught.__traceback_history__), 1)
+            old_tb = caught.__traceback_history__[0]
+            self.assertEqual(old_tb.tb_frame.f_code.co_name, 'capture')
+            self.assertEqual(
+                caught.__traceback__.tb_frame.f_code.co_name,
+                'test_foreign_reraise_appends_to_history')
+
+    def test_history_accumulates_across_multiple_reraises(self):
+        # Two distinct foreign call chains feed an exception through, and
+        # each contributes one history entry, oldest first.
+        def first_capture():
+            try:
+                raise ValueError('original')
+            except ValueError as e:
+                return e
+
+        def second_capture(exc):
+            try:
+                raise exc
+            except ValueError as e:
+                return e
+
+        err = first_capture()
+        err = second_capture(err)
+        # Second_capture's frame returned, so its frames in __traceback__
+        # are foreign to the test method's call chain. The next raise
+        # appends them as the second history entry.
+        try:
+            raise err
+        except ValueError as e2:
+            self.assertEqual(len(e2.__traceback_history__), 2)
+            # Oldest first: first entry's deepest is the original raise.
+            first = e2.__traceback_history__[0]
+            while first.tb_next is not None:
+                first = first.tb_next
+            self.assertEqual(first.tb_frame.f_code.co_name, 'first_capture')
+
+    def test_in_chain_reraise_does_not_append(self):
+        def outer():
+            try:
+                raise ValueError('deep')
+            except ValueError as e:
+                raise e
+        try:
+            outer()
+        except ValueError as caught:
+            self.assertEqual(caught.__traceback_history__, ())
+
+    def test_with_traceback_does_not_append(self):
+        def get_tb():
+            try:
+                raise IndexError()
+            except IndexError as e:
+                return e.__traceback__
+        tb = get_tb()
+        try:
+            raise RuntimeError('wrapped').with_traceback(tb)
+        except RuntimeError as caught:
+            self.assertEqual(caught.__traceback_history__, ())
+
+    def test_attribute_is_read_only(self):
+        e = ValueError('x')
+        with self.assertRaises(AttributeError):
+            e.__traceback_history__ = ()
+
+    def test_history_does_not_leak_into_cause_or_context(self):
+        def capture():
+            try:
+                raise ValueError('original')
+            except ValueError as e:
+                return e
+        err = capture()
+        try:
+            raise err
+        except ValueError as caught:
+            self.assertIsNone(caught.__cause__)
+            self.assertIsNone(caught.__context__)
+
+
 class NameErrorTests(unittest.TestCase):
     def test_name_error_has_name(self):
         try:

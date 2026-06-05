@@ -135,6 +135,10 @@ _context_message = (
     "\nDuring handling of the above exception, "
     "another exception occurred:\n\n")
 
+_history_message = (
+    "During an earlier raise of this exception, "
+    "the traceback was:\n")
+
 
 class _Sentinel:
     def __repr__(self):
@@ -1150,6 +1154,19 @@ class TracebackException:
             limit=limit, lookup_lines=lookup_lines,
             capture_locals=capture_locals)
 
+        # gh-116862: capture prior raise-site tracebacks. Each entry on
+        # exc_value.__traceback_history__ is an independent traceback
+        # fragment (oldest-first) of a previous raise of this exception
+        # from a foreign call chain.
+        history_tbs = getattr(exc_value, '__traceback_history__', ())
+        self.traceback_history = [
+            StackSummary._extract_from_extended_frame_gen(
+                _walk_tb_with_full_positions(tb),
+                limit=limit, lookup_lines=lookup_lines,
+                capture_locals=capture_locals)
+            for tb in history_tbs
+        ]
+
         self._exc_type = exc_type if save_exc_type else None
 
         # Capture now to permit freeing resources: only complication is in the
@@ -1651,6 +1668,11 @@ class TracebackException:
             if msg is not None:
                 yield from _ctx.emit(msg)
             if exc.exceptions is None:
+                # Render any earlier-raise tb fragments first (gh-116862).
+                for prior in getattr(exc, 'traceback_history', ()):
+                    if prior:
+                        yield from _ctx.emit(_history_message)
+                        yield from _ctx.emit(prior.format(colorize=colorize))
                 if exc.stack:
                     yield from _ctx.emit('Traceback (most recent call last):\n')
                     yield from _ctx.emit(exc.stack.format(colorize=colorize))
