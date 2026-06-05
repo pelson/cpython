@@ -568,38 +568,11 @@ do_raise(PyThreadState *tstate, PyObject *exc, PyObject *cause)
     assert(type != NULL);
     assert(value != NULL);
 
-    /* gh-116862: detect whether `value` carries a traceback that was
-       stitched in a call chain unrelated to where `raise` is now
-       happening. If so, preserve the existing tb on
-       __traceback_history__ (as a separate fragment, oldest-first)
-       rather than blending two unrelated stacks into one fictional
-       continuous trace. A user-defined tb is always preserved on
-       __traceback__ as-is (see user_defined_traceback). The
-       append-or-clear action runs AFTER cause handling, below. */
-    int foreign_tb = 0;
-    {
-        PyBaseExceptionObject *e = (PyBaseExceptionObject *)value;
-        _PyErr_StackItem *exc_info = _PyErr_GetTopmostException(tstate);
-        PyObject *active = exc_info ? exc_info->exc_value : NULL;
-        if (!e->user_defined_traceback && active != value && e->traceback != NULL) {
-            /* The existing tb is "foreign" unless its head frame appears
-               somewhere on the current call chain, in which case the tb
-               and the current frames compose into a coherent stack. */
-            PyTracebackObject *tb_head = (PyTracebackObject *)e->traceback;
-            PyFrameObject *tb_frame = tb_head->tb_frame;
-            int in_chain = 0;
-            for (_PyInterpreterFrame *f = tstate->current_frame;
-                 f != NULL; f = f->previous) {
-                if (f->frame_obj == tb_frame) {
-                    in_chain = 1;
-                    break;
-                }
-            }
-            if (!in_chain) {
-                foreign_tb = 1;
-            }
-        }
-    }
+    /* gh-116862: the foreign-traceback heuristic lives in
+       _PyErr_Restore (the lowest-level exception install path) so
+       every raise -- do_raise here, PyErr_SetObject, gen.throw(),
+       coroutine.throw() -- routes through it without duplicating
+       logic. */
 
     if (cause) {
         PyObject *fixed_cause;
@@ -631,27 +604,6 @@ do_raise(PyThreadState *tstate, PyObject *exc, PyObject *cause)
             goto raise_error;
         }
         PyException_SetCause(value, fixed_cause);
-    }
-
-    if (foreign_tb) {
-        /* Move the existing tb onto __traceback_history__ (oldest-first
-           tuple), then clear __traceback__ so a fresh tb is built from
-           the current raise site. */
-        PyBaseExceptionObject *e = (PyBaseExceptionObject *)value;
-        PyObject *history = e->traceback_history;
-        Py_ssize_t old_len = history ? PyTuple_GET_SIZE(history) : 0;
-        PyObject *new_history = PyTuple_New(old_len + 1);
-        if (new_history == NULL) {
-            goto raise_error;
-        }
-        for (Py_ssize_t i = 0; i < old_len; i++) {
-            PyObject *item = PyTuple_GET_ITEM(history, i);
-            Py_INCREF(item);
-            PyTuple_SET_ITEM(new_history, i, item);
-        }
-        PyTuple_SET_ITEM(new_history, old_len, Py_NewRef(e->traceback));
-        Py_XSETREF(e->traceback_history, new_history);
-        Py_CLEAR(e->traceback);
     }
 
     _PyErr_SetObject(tstate, type, value);

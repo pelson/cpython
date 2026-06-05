@@ -6,6 +6,7 @@
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
 #include "pycore_fileutils.h"     // _PyFile_Flush
 #include "pycore_initconfig.h"    // _PyStatus_ERR()
+#include "pycore_interpframe.h"   // _PyInterpreterFrame
 #include "pycore_pyerrors.h"      // _PyErr_Format()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_runtime.h"       // _Py_ID()
@@ -92,6 +93,55 @@ _PyErr_Restore(PyThreadState *tstate, PyObject *type, PyObject *value,
             return;
         }
         Py_DECREF(traceback);
+    }
+    /* gh-116862: if `value` carries a traceback that was stitched in a
+       call chain unrelated to where we are now installing it as the
+       active exception, move that traceback onto __traceback_history__
+       (oldest-first tuple) and clear __traceback__ so a fresh tb is
+       built from the actual raise site. This prevents the renderer
+       from splicing two unrelated stacks into one fictional continuous
+       path. A user-defined tb (set via the Python `__traceback__ =`
+       setter or `with_traceback`) is always preserved as-is. Placing
+       the heuristic here in _PyErr_Restore covers every exception
+       install path: do_raise, PyErr_SetObject, PyErr_Restore directly,
+       gen.throw / coroutine.throw, etc. */
+    {
+        PyBaseExceptionObject *e = (PyBaseExceptionObject *)value;
+        if (!e->user_defined_traceback && e->traceback != NULL) {
+            _PyErr_StackItem *exc_info = _PyErr_GetTopmostException(tstate);
+            PyObject *active = exc_info ? exc_info->exc_value : NULL;
+            if (active != value) {
+                PyTracebackObject *tb_head =
+                    (PyTracebackObject *)e->traceback;
+                PyFrameObject *tb_frame = tb_head->tb_frame;
+                int in_chain = 0;
+                for (_PyInterpreterFrame *f = tstate->current_frame;
+                     f != NULL; f = f->previous) {
+                    if (f->frame_obj == tb_frame) {
+                        in_chain = 1;
+                        break;
+                    }
+                }
+                if (!in_chain) {
+                    PyObject *history = e->traceback_history;
+                    Py_ssize_t old_len =
+                        history ? PyTuple_GET_SIZE(history) : 0;
+                    PyObject *new_history = PyTuple_New(old_len + 1);
+                    if (new_history != NULL) {
+                        for (Py_ssize_t i = 0; i < old_len; i++) {
+                            PyObject *item = PyTuple_GET_ITEM(history, i);
+                            Py_INCREF(item);
+                            PyTuple_SET_ITEM(new_history, i, item);
+                        }
+                        PyTuple_SET_ITEM(new_history, old_len,
+                                         Py_NewRef(e->traceback));
+                        Py_XSETREF(e->traceback_history, new_history);
+                        Py_CLEAR(e->traceback);
+                    }
+                    /* on PyTuple_New failure, leave state unchanged */
+                }
+            }
+        }
     }
     _PyErr_SetRaisedException(tstate, value);
     Py_DECREF(type);
