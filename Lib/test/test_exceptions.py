@@ -2045,15 +2045,24 @@ class CapturedExceptionReraiseTests(unittest.TestCase):
         self.assertNotIn('capture', names_after_clear)
 
 
-class TracebackHistoryTests(unittest.TestCase):
-    """`__traceback_history__` collects prior raise-site tracebacks when
-    an exception is re-raised from a foreign call chain (gh-116862)."""
+class TracebackTupleTests(unittest.TestCase):
+    """`__tracebacks__` is an ordered tuple of traceback fragments; each
+    fragment is one foreign call chain that contributed to the exception
+    (gh-116862). `__traceback__` aliases the last fragment."""
 
-    def test_attribute_empty_by_default(self):
+    def test_fresh_exception_has_no_tracebacks(self):
         e = ValueError('x')
-        self.assertEqual(e.__traceback_history__, ())
+        self.assertIsNone(e.__tracebacks__)
+        self.assertIsNone(e.__traceback__)
 
-    def test_foreign_reraise_appends_to_history(self):
+    def test_single_raise_produces_single_fragment(self):
+        try:
+            raise ValueError('x')
+        except ValueError as e:
+            self.assertEqual(len(e.__tracebacks__), 1)
+            self.assertIs(e.__traceback__, e.__tracebacks__[-1])
+
+    def test_foreign_reraise_appends_fragment(self):
         def capture():
             try:
                 raise ValueError('original')
@@ -2063,16 +2072,16 @@ class TracebackHistoryTests(unittest.TestCase):
         try:
             raise err
         except ValueError as caught:
-            self.assertEqual(len(caught.__traceback_history__), 1)
-            old_tb = caught.__traceback_history__[0]
+            self.assertEqual(len(caught.__tracebacks__), 2)
+            old_tb = caught.__tracebacks__[0]
             self.assertEqual(old_tb.tb_frame.f_code.co_name, 'capture')
             self.assertEqual(
                 caught.__traceback__.tb_frame.f_code.co_name,
-                'test_foreign_reraise_appends_to_history')
+                'test_foreign_reraise_appends_fragment')
 
-    def test_history_accumulates_across_multiple_reraises(self):
-        # Two distinct foreign call chains feed an exception through, and
-        # each contributes one history entry, oldest first.
+    def test_fragments_accumulate_across_multiple_reraises(self):
+        # Two distinct foreign call chains feed an exception through;
+        # each contributes one prior fragment, oldest first.
         def first_capture():
             try:
                 raise ValueError('original')
@@ -2087,20 +2096,17 @@ class TracebackHistoryTests(unittest.TestCase):
 
         err = first_capture()
         err = second_capture(err)
-        # Second_capture's frame returned, so its frames in __traceback__
-        # are foreign to the test method's call chain. The next raise
-        # appends them as the second history entry.
         try:
             raise err
         except ValueError as e2:
-            self.assertEqual(len(e2.__traceback_history__), 2)
-            # Oldest first: first entry's deepest is the original raise.
-            first = e2.__traceback_history__[0]
+            # 2 prior foreign chains + 1 current = 3 fragments total.
+            self.assertEqual(len(e2.__tracebacks__), 3)
+            first = e2.__tracebacks__[0]
             while first.tb_next is not None:
                 first = first.tb_next
             self.assertEqual(first.tb_frame.f_code.co_name, 'first_capture')
 
-    def test_in_chain_reraise_does_not_append(self):
+    def test_in_chain_reraise_extends_last_fragment(self):
         def outer():
             try:
                 raise ValueError('deep')
@@ -2109,7 +2115,7 @@ class TracebackHistoryTests(unittest.TestCase):
         try:
             outer()
         except ValueError as caught:
-            self.assertEqual(caught.__traceback_history__, ())
+            self.assertEqual(len(caught.__tracebacks__), 1)
 
     def test_with_traceback_does_not_append(self):
         def get_tb():
@@ -2121,14 +2127,87 @@ class TracebackHistoryTests(unittest.TestCase):
         try:
             raise RuntimeError('wrapped').with_traceback(tb)
         except RuntimeError as caught:
-            self.assertEqual(caught.__traceback_history__, ())
+            self.assertEqual(len(caught.__tracebacks__), 1)
+            last = caught.__tracebacks__[-1]
+            while last.tb_next is not None:
+                last = last.tb_next
+            self.assertEqual(last.tb_frame.f_code.co_name, 'get_tb')
 
-    def test_attribute_is_read_only(self):
-        e = ValueError('x')
-        with self.assertRaises(AttributeError):
-            e.__traceback_history__ = ()
+    def test_traceback_setter_replaces_last_fragment(self):
+        # Setting __traceback__ replaces the last fragment.
+        try:
+            raise ValueError()
+        except ValueError as e:
+            captured = e
+        try:
+            raise IndexError()
+        except IndexError as e:
+            replacement_tb = e.__traceback__
+        captured.__traceback__ = replacement_tb
+        self.assertEqual(len(captured.__tracebacks__), 1)
+        self.assertIs(captured.__traceback__, replacement_tb)
 
-    def test_history_does_not_leak_into_cause_or_context(self):
+    def test_tracebacks_setter_accepts_none_and_empty_tuple(self):
+        try:
+            raise ValueError('x')
+        except ValueError as e:
+            self.assertIsNotNone(e.__tracebacks__)
+            e.__tracebacks__ = None
+            self.assertIsNone(e.__tracebacks__)
+            self.assertIsNone(e.__traceback__)
+        try:
+            raise ValueError('y')
+        except ValueError as e:
+            e.__tracebacks__ = ()
+            self.assertIsNone(e.__tracebacks__)
+
+    def test_tracebacks_setter_preserves_order(self):
+        def get_tb():
+            try:
+                raise IndexError()
+            except IndexError as e:
+                return e.__traceback__
+        tb1, tb2 = get_tb(), get_tb()
+        e = ValueError()
+        e.__tracebacks__ = (tb1, tb2)
+        self.assertEqual(len(e.__tracebacks__), 2)
+        self.assertIs(e.__tracebacks__[0], tb1)
+        self.assertIs(e.__tracebacks__[1], tb2)
+        self.assertIs(e.__traceback__, tb2)
+
+    def test_tracebacks_setter_rejects_list(self):
+        def get_tb():
+            try:
+                raise IndexError()
+            except IndexError as e:
+                return e.__traceback__
+        e = ValueError()
+        with self.assertRaises(TypeError):
+            e.__tracebacks__ = [get_tb()]
+
+    def test_tracebacks_setter_rejects_non_tb_elements(self):
+        e = ValueError()
+        with self.assertRaises(TypeError):
+            e.__tracebacks__ = (None,)
+        with self.assertRaises(TypeError):
+            e.__tracebacks__ = ('not a tb',)
+
+    def test_tracebacks_iadd_sugar(self):
+        def get_tb():
+            try:
+                raise IndexError()
+            except IndexError as e:
+                return e.__traceback__
+        tb = get_tb()
+        try:
+            raise ValueError('x')
+        except ValueError as e:
+            before = e.__tracebacks__
+            e.__tracebacks__ += (tb,)
+            self.assertEqual(len(e.__tracebacks__), len(before) + 1)
+            self.assertIs(e.__tracebacks__[-1], tb)
+
+    def test_fragments_do_not_leak_into_cause_or_context(self):
         def capture():
             try:
                 raise ValueError('original')

@@ -1154,17 +1154,18 @@ class TracebackException:
             limit=limit, lookup_lines=lookup_lines,
             capture_locals=capture_locals)
 
-        # gh-116862: capture prior raise-site tracebacks. Each entry on
-        # exc_value.__traceback_history__ is an independent traceback
-        # fragment (oldest-first) of a previous raise of this exception
-        # from a foreign call chain.
-        history_tbs = getattr(exc_value, '__traceback_history__', ())
-        self.traceback_history = [
+        # gh-116862: capture prior raise-site tracebacks. exc_value
+        # carries an ordered tuple of fragments on __tracebacks__; the
+        # last fragment corresponds to self.stack (built from
+        # exc_traceback above) and the earlier fragments are independent
+        # prior-raise call chains.
+        tbs = getattr(exc_value, '__tracebacks__', None) or ()
+        self._prior_stacks = [
             StackSummary._extract_from_extended_frame_gen(
                 _walk_tb_with_full_positions(tb),
                 limit=limit, lookup_lines=lookup_lines,
                 capture_locals=capture_locals)
-            for tb in history_tbs
+            for tb in tbs[:-1]
         ]
 
         self._exc_type = exc_type if save_exc_type else None
@@ -1669,7 +1670,7 @@ class TracebackException:
                 yield from _ctx.emit(msg)
             if exc.exceptions is None:
                 # Render any earlier-raise tb fragments first (gh-116862).
-                for prior in getattr(exc, 'traceback_history', ()):
+                for prior in getattr(exc, '_prior_stacks', ()):
                     if prior:
                         yield from _ctx.emit(_history_message)
                         yield from _ctx.emit(prior.format(colorize=colorize))

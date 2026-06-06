@@ -209,8 +209,8 @@ class Future:
             raise exceptions.InvalidStateError('Result is not ready.')
         self.__log_traceback = False
         if self._exception is not None:
-            # gh-116862: bare raise lets the foreign-tb heuristic move
-            # the worker tb onto __traceback_history__, so the rendered
+            # gh-116862: bare raise lets the foreign-tb heuristic push a
+            # new fragment onto exc.__tracebacks__, so the rendered
             # traceback shows the worker chain and the awaiter chain as
             # separate fragments instead of one fictional spliced path.
             raise self._exception

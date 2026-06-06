@@ -20,20 +20,20 @@ class FutureTests:
         future = self.cls(raise_exc())
 
         # gh-116862: re-awaiting the same finished future re-raises the
-        # stored exception. The worker traceback is preserved on
-        # __traceback_history__ (oldest first); the current
-        # __traceback__ is built from the actual raise site each time.
-        # In particular, the worker's `raise TypeError(42)` line lives
-        # in the first history fragment, not in __traceback__.
+        # stored exception. The worker traceback is preserved as an
+        # earlier fragment on __tracebacks__; the current __traceback__
+        # (== __tracebacks__[-1]) is built from the actual raise site
+        # each time. The worker's `raise TypeError(42)` line lives in
+        # one of the earlier fragments, not in __traceback__.
         for _ in range(5):
             try:
                 await future
             except TypeError as e:
-                history_tbs = ''.join(
+                prior_tbs = ''.join(
                     ''.join(traceback.format_tb(tb))
-                    for tb in e.__traceback_history__
+                    for tb in e.__tracebacks__[:-1]
                 )
-                self.assertIn('raise TypeError(42)', history_tbs)
+                self.assertIn('raise TypeError(42)', prior_tbs)
                 self.assertIn('await future', ''.join(
                     traceback.format_tb(e.__traceback__)))
             else:
