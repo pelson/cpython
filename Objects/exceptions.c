@@ -61,6 +61,8 @@ BaseException_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     self->notes = NULL;
     self->traceback = self->cause = self->context = NULL;
     self->suppress_context = 0;
+    self->user_defined_traceback = 0;
+    self->traceback_history = NULL;
 
     if (args) {
         self->args = Py_NewRef(args);
@@ -110,6 +112,8 @@ BaseException_vectorcall(PyObject *type_obj, PyObject * const*args,
     self->cause = NULL;
     self->context = NULL;
     self->suppress_context = 0;
+    self->user_defined_traceback = 0;
+    self->traceback_history = NULL;
 
     self->args = PyTuple_FromArray(args, PyVectorcall_NARGS(nargsf));
     if (!self->args) {
@@ -131,6 +135,7 @@ BaseException_clear(PyObject *op)
     Py_CLEAR(self->traceback);
     Py_CLEAR(self->cause);
     Py_CLEAR(self->context);
+    Py_CLEAR(self->traceback_history);
     return 0;
 }
 
@@ -156,6 +161,7 @@ BaseException_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->traceback);
     Py_VISIT(self->cause);
     Py_VISIT(self->context);
+    Py_VISIT(self->traceback_history);
     return 0;
 }
 
@@ -380,16 +386,12 @@ BaseException___traceback___get_impl(PyBaseExceptionObject *self)
 }
 
 
-/*[clinic input]
-@critical_section
-@setter
-BaseException.__traceback__
-[clinic start generated code]*/
-
+/* Shared by the Python-level __traceback__ setter and the C API
+   PyException_SetTraceback. Type-checks `value` and assigns it to
+   self->traceback (or clears it on None). Does NOT touch the
+   user_defined_traceback flag; callers do that if they need it. */
 static int
-BaseException___traceback___set_impl(PyBaseExceptionObject *self,
-                                     PyObject *value)
-/*[clinic end generated code: output=a82c86d9f29f48f0 input=12676035676badad]*/
+set_traceback_field(PyBaseExceptionObject *self, PyObject *value)
 {
     if (value == NULL) {
         PyErr_SetString(PyExc_TypeError, "__traceback__ may not be deleted");
@@ -408,6 +410,138 @@ BaseException___traceback___set_impl(PyBaseExceptionObject *self,
     }
     return 0;
 }
+
+/*[clinic input]
+@critical_section
+@setter
+BaseException.__traceback__
+[clinic start generated code]*/
+
+static int
+BaseException___traceback___set_impl(PyBaseExceptionObject *self,
+                                     PyObject *value)
+/*[clinic end generated code: output=a82c86d9f29f48f0 input=12676035676badad]*/
+{
+    int res = set_traceback_field(self, value);
+    if (res < 0) {
+        return res;
+    }
+    /* A real tb assigned from Python is user-defined and survives a
+       subsequent raise; assigning None clears the mark so the next raise
+       falls back to the normal heuristic. */
+    self->user_defined_traceback = (value != Py_None);
+    return 0;
+}
+
+/* Getter for __tracebacks__ (gh-116862): the full ordered tuple of
+   traceback fragments. Each fragment is one foreign call chain that
+   contributed to this exception; the last fragment is the current
+   __traceback__. Returns None on a fresh exception that has never
+   been raised.
+
+   This is a *computed* facade over the underlying sidecar fields
+   (self->traceback_history holds the prior fragments, self->traceback
+   holds the current/last one). The C struct layout is intentionally
+   preserved so that existing C extensions reading
+   PyBaseExceptionObject->traceback continue to work. */
+static PyObject *
+BaseException___tracebacks___get(PyObject *op, void *Py_UNUSED(closure))
+{
+    PyBaseExceptionObject *self = PyBaseExceptionObject_CAST(op);
+    PyObject *result;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (self->traceback == NULL) {
+        /* A fresh, never-raised exception. traceback_history is also
+           NULL in this state (history is only populated when a foreign
+           re-raise pushes the prior `traceback` onto it). */
+        assert(self->traceback_history == NULL
+               || PyTuple_GET_SIZE(self->traceback_history) == 0);
+        result = Py_NewRef(Py_None);
+    }
+    else {
+        Py_ssize_t hn = (self->traceback_history == NULL)
+            ? 0 : PyTuple_GET_SIZE(self->traceback_history);
+        result = PyTuple_New(hn + 1);
+        if (result != NULL) {
+            for (Py_ssize_t i = 0; i < hn; i++) {
+                PyTuple_SET_ITEM(result, i,
+                    Py_NewRef(PyTuple_GET_ITEM(self->traceback_history, i)));
+            }
+            PyTuple_SET_ITEM(result, hn, Py_NewRef(self->traceback));
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+    return result;
+}
+
+/* Setter for __tracebacks__ (gh-116862). Accepts None or a tuple of
+   TracebackType. Lists are explicitly rejected — __tracebacks__ is
+   intentionally immutable so capturing it can't be mutated under the
+   holder. The supported user-facing mutation is
+   `exc.__tracebacks__ += (tb,)`.
+
+   Internally we split the tuple: last element → self->traceback,
+   first n-1 → self->traceback_history. */
+static int
+BaseException___tracebacks___set(PyObject *op, PyObject *value,
+                                 void *Py_UNUSED(closure))
+{
+    PyBaseExceptionObject *self = PyBaseExceptionObject_CAST(op);
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError,
+                        "__tracebacks__ may not be deleted");
+        return -1;
+    }
+    if (value != Py_None && !PyTuple_CheckExact(value)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "__tracebacks__ must be a tuple of traceback "
+                        "objects or None");
+        return -1;
+    }
+    Py_ssize_t n = 0;
+    if (value != Py_None) {
+        n = PyTuple_GET_SIZE(value);
+        for (Py_ssize_t i = 0; i < n; i++) {
+            PyObject *item = PyTuple_GET_ITEM(value, i);
+            if (!PyTraceBack_Check(item)) {
+                PyErr_SetString(PyExc_TypeError,
+                                "each element of __tracebacks__ must be "
+                                "a traceback object");
+                return -1;
+            }
+        }
+    }
+
+    /* Build the new history tuple before mutating fields so that if
+       allocation fails we can leave state unchanged. */
+    PyObject *new_history = NULL;
+    PyObject *new_last = NULL;
+    if (n > 1) {
+        new_history = PyTuple_New(n - 1);
+        if (new_history == NULL) {
+            return -1;
+        }
+        for (Py_ssize_t i = 0; i < n - 1; i++) {
+            PyTuple_SET_ITEM(new_history, i,
+                Py_NewRef(PyTuple_GET_ITEM(value, i)));
+        }
+    }
+    if (n >= 1) {
+        new_last = Py_NewRef(PyTuple_GET_ITEM(value, n - 1));
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    Py_XSETREF(self->traceback_history, new_history);
+    Py_XSETREF(self->traceback, new_last);
+    Py_END_CRITICAL_SECTION();
+    return 0;
+}
+
+PyDoc_STRVAR(BaseException___tracebacks___doc,
+"Tuple of traceback fragments for this exception, in order of raise. "
+"None on a fresh exception. __traceback__ is an alias for the last "
+"fragment. Assigning a list raises TypeError; use tuple concatenation "
+"(e.g. exc.__tracebacks__ += (tb,)) to grow the history.");
 
 /*[clinic input]
 @critical_section
@@ -503,6 +637,9 @@ static PyGetSetDef BaseException_getset[] = {
      BASEEXCEPTION___TRACEBACK___GETSETDEF
      BASEEXCEPTION___CONTEXT___GETSETDEF
      BASEEXCEPTION___CAUSE___GETSETDEF
+    {"__tracebacks__", BaseException___tracebacks___get,
+     BaseException___tracebacks___set,
+     BaseException___tracebacks___doc},
     {NULL},
 };
 
@@ -521,9 +658,12 @@ PyException_GetTraceback(PyObject *self)
 int
 PyException_SetTraceback(PyObject *self, PyObject *tb)
 {
+    /* C-API tb assignment is not user-defined: this is the same path
+       the internal auto-stitcher (PyTraceBack_Here) takes, and stitched
+       frames must not be marked as user-defined. */
     int res;
     Py_BEGIN_CRITICAL_SECTION(self);
-    res = BaseException___traceback___set_impl(PyBaseExceptionObject_CAST(self), tb);
+    res = set_traceback_field(PyBaseExceptionObject_CAST(self), tb);
     Py_END_CRITICAL_SECTION();
     return res;
 }

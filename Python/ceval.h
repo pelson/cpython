@@ -568,6 +568,12 @@ do_raise(PyThreadState *tstate, PyObject *exc, PyObject *cause)
     assert(type != NULL);
     assert(value != NULL);
 
+    /* gh-116862: the foreign-traceback heuristic lives in
+       _PyErr_Restore (the lowest-level exception install path) so
+       every raise -- do_raise here, PyErr_SetObject, gen.throw(),
+       coroutine.throw() -- routes through it without duplicating
+       logic. */
+
     if (cause) {
         PyObject *fixed_cause;
         if (PyExceptionClass_Check(cause)) {

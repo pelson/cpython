@@ -803,11 +803,34 @@ print_exception_invalid_type(struct exception_print_context *ctx,
     return 0;
 }
 
+static const char history_message[] =
+    "During an earlier raise of this exception, "
+    "the traceback was:\n";
+
 static int
 print_exception_traceback(struct exception_print_context *ctx, PyObject *value)
 {
     PyObject *f = ctx->file;
     int err = 0;
+
+    /* gh-116862: render any prior-raise traceback fragments stored on
+       __traceback_history__ (oldest-first) before the current
+       __traceback__. Each fragment is prefixed with a boundary line
+       distinct from the cause/context markers. */
+    if (PyExceptionInstance_Check(value)) {
+        PyObject *history = ((PyBaseExceptionObject *)value)->traceback_history;
+        if (history != NULL && PyTuple_Check(history)) {
+            Py_ssize_t n = PyTuple_GET_SIZE(history);
+            for (Py_ssize_t i = 0; i < n; i++) {
+                PyObject *frag = PyTuple_GET_ITEM(history, i);
+                if (frag != NULL && PyTraceBack_Check(frag)) {
+                    if (_PyTraceBack_Print(frag, history_message, f) < 0) {
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
 
     PyObject *tb = PyException_GetTraceback(value);
     if (tb && tb != Py_None) {

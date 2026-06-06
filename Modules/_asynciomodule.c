@@ -773,6 +773,11 @@ future_get_result(asyncio_state *state, FutureObj *fut, PyObject **result)
         if (tb == NULL) {
             tb = Py_None;
         }
+        /* gh-116862: PyException_SetTraceback attaches the worker tb
+           to the exception; whatever consumes the exception next
+           (PyErr_SetObject in result_impl, or task_step.throw() for the
+           wakeup path) routes it through the foreign-tb heuristic in
+           _PyErr_Restore. */
         if (PyException_SetTraceback(fut->fut_exception, tb) < 0) {
             return -1;
         }
